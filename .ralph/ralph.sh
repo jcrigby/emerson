@@ -1,28 +1,40 @@
 #!/bin/bash
 #
-# ralph.sh - Automated development loop using Claude API
+# ralph.sh - Automated development loop using Claude Code
 #
 # Usage:
 #   ./ralph.sh                    # Run all pending issues
 #   ./ralph.sh --issue 001        # Run specific issue
-#   ./ralph.sh --parse PRD.md     # Parse PRD into issues.json
 #   ./ralph.sh --status           # Show current status
+#   ./ralph.sh --reset 001        # Reset issue to pending
+#   ./ralph.sh --verbose          # Show all commands (combine with above)
 #
-# Environment:
-#   ANTHROPIC_API_KEY - Required for Claude API calls
-#   RALPH_MODEL       - Model to use (default: claude-sonnet-4-20250514)
-#   RALPH_MAX_TOKENS  - Max tokens for response (default: 8192)
+# Examples:
+#   ./ralph.sh --verbose --issue 001    # Watch one issue in detail
+#   ./ralph.sh --verbose                # Watch entire loop in detail
+#
+# Requirements:
+#   - Claude Code CLI installed (`claude` command available)
+#   - jq installed
+#   - npm/node installed
 #
 
 set -e
+
+# Check for --verbose flag
+VERBOSE=false
+for arg in "$@"; do
+    if [ "$arg" == "--verbose" ] || [ "$arg" == "-v" ]; then
+        VERBOSE=true
+        set -x
+    fi
+done
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 ISSUES_FILE="$SCRIPT_DIR/issues.json"
 LOG_DIR="$SCRIPT_DIR/logs"
-MODEL="${RALPH_MODEL:-claude-sonnet-4-20250514}"
-MAX_TOKENS="${RALPH_MAX_TOKENS:-8192}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -39,57 +51,13 @@ check_dependencies() {
     local missing=()
     
     command -v jq >/dev/null 2>&1 || missing+=("jq")
-    command -v curl >/dev/null 2>&1 || missing+=("curl")
+    command -v claude >/dev/null 2>&1 || missing+=("claude (Claude Code CLI)")
     command -v npm >/dev/null 2>&1 || missing+=("npm")
     
     if [ ${#missing[@]} -ne 0 ]; then
         echo -e "${RED}Missing required tools: ${missing[*]}${NC}"
         exit 1
     fi
-    
-    if [ -z "$ANTHROPIC_API_KEY" ]; then
-        echo -e "${RED}ANTHROPIC_API_KEY environment variable is required${NC}"
-        exit 1
-    fi
-}
-
-# Call Claude API
-call_claude() {
-    local system_prompt="$1"
-    local user_prompt="$2"
-    local output_file="$3"
-    
-    local request_body=$(jq -n \
-        --arg model "$MODEL" \
-        --argjson max_tokens "$MAX_TOKENS" \
-        --arg system "$system_prompt" \
-        --arg user "$user_prompt" \
-        '{
-            model: $model,
-            max_tokens: $max_tokens,
-            messages: [
-                {role: "user", content: $user}
-            ],
-            system: $system
-        }')
-    
-    local response=$(curl -s https://api.anthropic.com/v1/messages \
-        -H "Content-Type: application/json" \
-        -H "x-api-key: $ANTHROPIC_API_KEY" \
-        -H "anthropic-version: 2023-06-01" \
-        -d "$request_body")
-    
-    # Extract content from response
-    local content=$(echo "$response" | jq -r '.content[0].text // empty')
-    
-    if [ -z "$content" ]; then
-        echo -e "${RED}Error from Claude API:${NC}"
-        echo "$response" | jq -r '.error.message // .'
-        return 1
-    fi
-    
-    echo "$content" > "$output_file"
-    return 0
 }
 
 # Get next pending issue
@@ -103,7 +71,7 @@ get_issue() {
     jq -r ".issues[] | select(.id == \"$id\")" "$ISSUES_FILE"
 }
 
-# Update issue status
+# Update issue field
 update_issue() {
     local id="$1"
     local field="$2"
@@ -121,46 +89,11 @@ increment_attempts() {
     update_issue "$id" "attempts" "$((current + 1))"
 }
 
-# Read relevant files for context
-read_relevant_files() {
-    local issue_id="$1"
-    local files=$(jq -r ".issues[] | select(.id == \"$issue_id\") | .relevant_files[]" "$ISSUES_FILE")
-    
-    local context=""
-    for file in $files; do
-        local filepath="$PROJECT_ROOT/$file"
-        if [ -f "$filepath" ]; then
-            context+="
-=== $file ===
-$(cat "$filepath")
-"
-        fi
-    done
-    
-    echo "$context"
-}
-
-# Run build
-run_build() {
-    echo -e "${BLUE}Running build...${NC}"
-    cd "$PROJECT_ROOT"
-    
-    if npm run build > "$LOG_DIR/build.log" 2>&1; then
-        echo -e "${GREEN}Build passed${NC}"
-        return 0
-    else
-        echo -e "${RED}Build failed${NC}"
-        cat "$LOG_DIR/build.log"
-        return 1
-    fi
-}
-
-# Run tests
-run_tests() {
+# Run a specific test
+run_test() {
     local test_file="$1"
     local test_name="$2"
     
-    echo -e "${BLUE}Running tests...${NC}"
     cd "$PROJECT_ROOT"
     
     local test_cmd="npx playwright test"
@@ -171,23 +104,21 @@ run_tests() {
         test_cmd+=" -g \"$test_name\""
     fi
     
-    if $test_cmd > "$LOG_DIR/test.log" 2>&1; then
-        echo -e "${GREEN}Tests passed${NC}"
+    echo -e "${BLUE}Running: $test_cmd${NC}"
+    
+    if eval "$test_cmd" > "$LOG_DIR/test.log" 2>&1; then
         return 0
     else
-        echo -e "${RED}Tests failed${NC}"
-        # Extract just the failure summary
-        grep -A 20 "failing" "$LOG_DIR/test.log" || cat "$LOG_DIR/test.log"
         return 1
     fi
 }
 
-# Process a single issue
+# Process a single issue using Claude Code
 process_issue() {
     local issue_id="$1"
     local issue=$(get_issue "$issue_id")
     
-    if [ -z "$issue" ]; then
+    if [ -z "$issue" ] || [ "$issue" == "null" ]; then
         echo -e "${RED}Issue $issue_id not found${NC}"
         return 1
     fi
@@ -196,186 +127,111 @@ process_issue() {
     local spec=$(echo "$issue" | jq -r '.spec')
     local test_file=$(echo "$issue" | jq -r '.test_file')
     local test_name=$(echo "$issue" | jq -r '.test_name')
+    local attempts=$(echo "$issue" | jq -r '.attempts')
+    local max_attempts=$(echo "$issue" | jq -r '.max_attempts')
     local last_error=$(echo "$issue" | jq -r '.last_error // empty')
     
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${YELLOW}Processing: $title${NC}"
+    echo -e "${YELLOW}Issue $issue_id: $title${NC}"
+    echo -e "${YELLOW}Attempt $((attempts + 1)) of $max_attempts${NC}"
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     
-    # Read context
-    local file_context=$(read_relevant_files "$issue_id")
-    
-    # Build prompt
-    local system_prompt="You are an expert TypeScript/React developer working on the Emerson project - an AI-powered novel writing tool.
-
-Your task is to implement or fix code to make a specific test pass. You will be given:
-1. The specification for what needs to work
-2. The relevant source files
-3. The test that needs to pass
-4. Any previous error messages
-
-Respond with ONLY the file changes needed. Use this exact format for each file:
-
-=== FILE: path/to/file.tsx ===
-\`\`\`typescript
-// Complete file contents here
-\`\`\`
-
-If multiple files need changes, include multiple FILE blocks.
-Do not include explanations outside of code comments.
-Do not include partial files - always output the complete file."
-
-    local user_prompt="## Issue: $title
-
-## Specification
-$spec
-
-## Relevant Files
-$file_context
-
-## Test to Pass
-File: $test_file
-Test: $test_name"
-
-    if [ -n "$last_error" ]; then
-        user_prompt+="
-
-## Previous Error
-$last_error"
-    fi
-    
-    # Call Claude
     increment_attempts "$issue_id"
-    local response_file="$LOG_DIR/response_${issue_id}.txt"
     
-    echo -e "${BLUE}Calling Claude API...${NC}"
-    if ! call_claude "$system_prompt" "$user_prompt" "$response_file"; then
-        update_issue "$issue_id" "last_error" "\"API call failed\""
-        return 1
+    # Build the prompt for Claude Code
+    local prompt="You are working on the Emerson project, an AI-powered novel writing tool.
+
+## Your Task
+
+Implement or fix code to make this test pass:
+
+**Issue:** $title
+
+**Specification:** $spec
+
+**Test File:** $test_file
+**Test Name:** $test_name
+
+## Instructions
+
+1. First, read the test file to understand what's being tested
+2. Explore the codebase to understand the current implementation
+3. Make the necessary code changes
+4. Run the specific test to verify: npx playwright test $test_file -g \"$test_name\"
+5. If the test fails, read the error and fix it
+6. Repeat until the test passes
+
+When the test passes, say \"TEST PASSED\" and stop.
+If you've tried multiple approaches and can't make it pass, say \"GIVING UP\" and explain why."
+
+    # Add last error context if available
+    if [ -n "$last_error" ] && [ "$last_error" != "null" ]; then
+        prompt+="
+
+## Previous Attempt Failed With:
+$last_error
+
+Try a different approach this time."
     fi
     
-    # Parse and apply file changes
-    echo -e "${BLUE}Applying changes...${NC}"
-    apply_changes "$response_file"
+    # Run Claude Code in one-shot mode
+    echo -e "${BLUE}Invoking Claude Code...${NC}"
     
-    # Run build
-    if ! run_build; then
-        local error=$(tail -50 "$LOG_DIR/build.log" | jq -Rs .)
-        update_issue "$issue_id" "last_error" "$error"
-        return 1
-    fi
+    cd "$PROJECT_ROOT"
     
-    # Run tests
-    if ! run_tests "$test_file" "$test_name"; then
-        local error=$(tail -50 "$LOG_DIR/test.log" | jq -Rs .)
-        update_issue "$issue_id" "last_error" "$error"
-        return 1
-    fi
+    # Use claude with -p for one-shot mode
+    local output_file="$LOG_DIR/claude_${issue_id}_$(date +%s).log"
     
-    # Success!
-    update_issue "$issue_id" "status" "\"complete\""
-    update_issue "$issue_id" "last_error" "null"
-    echo -e "${GREEN}✓ Issue $issue_id complete!${NC}"
-    return 0
-}
-
-# Apply file changes from Claude's response
-apply_changes() {
-    local response_file="$1"
-    
-    # Extract file blocks using awk
-    awk '
-        /^=== FILE: / {
-            # Extract filename
-            match($0, /FILE: ([^ ]+)/, arr)
-            filename = arr[1]
-            in_file = 1
-            in_code = 0
-            content = ""
-            next
-        }
-        /^```/ {
-            if (in_file) {
-                if (in_code) {
-                    # End of code block - write file
-                    print content > "'"$PROJECT_ROOT"'/" filename
-                    close("'"$PROJECT_ROOT"'/" filename)
-                    print "  Updated: " filename
-                    in_file = 0
-                    in_code = 0
-                } else {
-                    # Start of code block
-                    in_code = 1
-                }
-            }
-            next
-        }
-        in_code {
-            content = content $0 "\n"
-        }
-    ' "$response_file"
-}
-
-# Parse PRD into issues
-parse_prd() {
-    local prd_file="$1"
-    
-    if [ ! -f "$prd_file" ]; then
-        echo -e "${RED}PRD file not found: $prd_file${NC}"
-        exit 1
-    fi
-    
-    echo -e "${BLUE}Parsing PRD into issues...${NC}"
-    
-    local system_prompt="You are a technical project manager. Parse the given PRD into discrete, testable issues for an automated development loop.
-
-Each issue should:
-1. Be completable in a single coding session
-2. Have a clear, testable acceptance criterion
-3. List the specific files that need to be modified
-4. Build on previous issues (specify dependencies)
-
-Output valid JSON matching this schema:
-{
-  \"project\": \"emerson\",
-  \"version\": \"string\",
-  \"created\": \"YYYY-MM-DD\",
-  \"issues\": [
-    {
-      \"id\": \"001\",
-      \"title\": \"Short title\",
-      \"status\": \"pending\",
-      \"priority\": 1,
-      \"spec\": \"Detailed specification of what needs to work\",
-      \"test_file\": \"tests/example.spec.ts\",
-      \"test_name\": \"test description to match\",
-      \"relevant_files\": [\"src/file1.tsx\", \"src/file2.ts\"],
-      \"depends_on\": [],
-      \"attempts\": 0,
-      \"max_attempts\": 5,
-      \"last_error\": null
-    }
-  ]
-}
-
-Output ONLY valid JSON, no markdown or explanation."
-
-    local prd_content=$(cat "$prd_file")
-    local response_file="$LOG_DIR/prd_parse.json"
-    
-    if call_claude "$system_prompt" "$prd_content" "$response_file"; then
-        # Validate JSON
-        if jq empty "$response_file" 2>/dev/null; then
-            cp "$response_file" "$ISSUES_FILE"
-            echo -e "${GREEN}Created issues.json with $(jq '.issues | length' "$ISSUES_FILE") issues${NC}"
+    if claude -p "$prompt" 2>&1 | tee "$output_file"; then
+        # Check if Claude reported success
+        if grep -q "TEST PASSED" "$output_file"; then
+            echo -e "${GREEN}✓ Claude reports test passed${NC}"
+            
+            # Verify by running the test ourselves
+            if run_test "$test_file" "$test_name"; then
+                echo -e "${GREEN}✓ Test verified passing!${NC}"
+                update_issue "$issue_id" "status" "\"complete\""
+                update_issue "$issue_id" "last_error" "null"
+                return 0
+            else
+                echo -e "${RED}✗ Test still failing on verification${NC}"
+                local error=$(tail -30 "$LOG_DIR/test.log" | jq -Rs .)
+                update_issue "$issue_id" "last_error" "$error"
+                return 1
+            fi
+        elif grep -q "GIVING UP" "$output_file"; then
+            echo -e "${RED}✗ Claude gave up on this issue${NC}"
+            local reason=$(grep -A 10 "GIVING UP" "$output_file" | head -10 | jq -Rs .)
+            update_issue "$issue_id" "last_error" "$reason"
+            return 1
         else
-            echo -e "${RED}Invalid JSON in response${NC}"
-            cat "$response_file"
-            exit 1
+            echo -e "${YELLOW}? Claude finished without clear success/failure${NC}"
+            # Try running the test to see where we are
+            if run_test "$test_file" "$test_name"; then
+                echo -e "${GREEN}✓ Test passes!${NC}"
+                update_issue "$issue_id" "status" "\"complete\""
+                update_issue "$issue_id" "last_error" "null"
+                return 0
+            else
+                local error=$(tail -30 "$LOG_DIR/test.log" | jq -Rs .)
+                update_issue "$issue_id" "last_error" "$error"
+                return 1
+            fi
         fi
     else
-        exit 1
+        echo -e "${RED}✗ Claude Code exited with error${NC}"
+        update_issue "$issue_id" "last_error" "\"Claude Code exited with error\""
+        return 1
     fi
+}
+
+# Reset an issue to pending
+reset_issue() {
+    local id="$1"
+    update_issue "$id" "status" "\"pending\""
+    update_issue "$id" "attempts" "0"
+    update_issue "$id" "last_error" "null"
+    echo -e "${GREEN}Reset issue $id to pending${NC}"
 }
 
 # Show status
@@ -386,27 +242,31 @@ show_status() {
     
     local total=$(jq '.issues | length' "$ISSUES_FILE")
     local complete=$(jq '[.issues[] | select(.status == "complete")] | length' "$ISSUES_FILE")
-    local pending=$(jq '[.issues[] | select(.status == "pending")] | length' "$ISSUES_FILE")
-    local failed=$(jq '[.issues[] | select(.attempts >= .max_attempts)] | length' "$ISSUES_FILE")
+    local pending=$(jq '[.issues[] | select(.status == "pending") | select(.attempts < .max_attempts)] | length' "$ISSUES_FILE")
+    local maxed=$(jq '[.issues[] | select(.status == "pending") | select(.attempts >= .max_attempts)] | length' "$ISSUES_FILE")
     
-    echo -e "Total issues:    $total"
-    echo -e "${GREEN}Complete:        $complete${NC}"
-    echo -e "${YELLOW}Pending:         $pending${NC}"
-    echo -e "${RED}Max attempts:    $failed${NC}"
+    echo ""
+    echo -e "Total issues:     $total"
+    echo -e "${GREEN}Complete:         $complete${NC}"
+    echo -e "${YELLOW}Pending:          $pending${NC}"
+    echo -e "${RED}Max attempts:     $maxed${NC}"
     echo ""
     
     echo "Issues:"
-    jq -r '.issues[] | "  [\(.status | if . == "complete" then "✓" elif .attempts >= .max_attempts then "✗" else "○" end)] \(.id): \(.title) (attempts: \(.attempts))"' "$ISSUES_FILE"
+    jq -r '.issues[] | "  [\(if .status == "complete" then "✓" elif .attempts >= .max_attempts then "✗" else "○" end)] \(.id): \(.title) (\(.attempts)/\(.max_attempts))"' "$ISSUES_FILE"
 }
 
 # Main loop
 run_loop() {
     echo -e "${BLUE}Starting Ralph development loop...${NC}"
+    echo -e "${BLUE}Each issue runs in a fresh Claude Code session${NC}"
+    echo ""
     
     while true; do
         local issue_id=$(get_next_issue)
         
         if [ -z "$issue_id" ]; then
+            echo ""
             echo -e "${GREEN}No more pending issues!${NC}"
             show_status
             break
@@ -417,50 +277,75 @@ run_loop() {
             local max=$(jq -r ".issues[] | select(.id == \"$issue_id\") | .max_attempts" "$ISSUES_FILE")
             
             if [ "$attempts" -ge "$max" ]; then
-                echo -e "${RED}Issue $issue_id reached max attempts, moving on...${NC}"
+                echo -e "${RED}Issue $issue_id reached max attempts, skipping...${NC}"
             else
                 echo -e "${YELLOW}Issue $issue_id failed, will retry...${NC}"
             fi
         fi
         
         echo ""
+        
+        # Small delay between issues
+        sleep 2
     done
 }
 
-# Main
+# Main - filter out verbose flag from args
 main() {
     check_dependencies
     
-    case "${1:-}" in
-        --parse)
-            if [ -z "${2:-}" ]; then
-                echo "Usage: $0 --parse <PRD.md>"
-                exit 1
-            fi
-            parse_prd "$2"
-            ;;
+    # Build args array without verbose flag
+    local args=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --verbose|-v)
+                shift
+                ;;
+            *)
+                args+=("$1")
+                shift
+                ;;
+        esac
+    done
+    
+    # Process remaining args
+    case "${args[0]:-}" in
         --issue)
-            if [ -z "${2:-}" ]; then
+            if [ -z "${args[1]:-}" ]; then
                 echo "Usage: $0 --issue <issue_id>"
                 exit 1
             fi
-            process_issue "$2"
+            process_issue "${args[1]}"
             ;;
         --status)
             show_status
+            ;;
+        --reset)
+            if [ -z "${args[1]:-}" ]; then
+                echo "Usage: $0 --reset <issue_id>"
+                exit 1
+            fi
+            reset_issue "${args[1]}"
             ;;
         --help|-h)
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --parse <PRD.md>   Parse PRD into issues.json"
             echo "  --issue <id>       Process specific issue"
             echo "  --status           Show current status"
+            echo "  --reset <id>       Reset issue to pending"
+            echo "  --verbose, -v      Show all commands being executed"
             echo "  --help             Show this help"
             echo ""
-            echo "Environment:"
-            echo "  ANTHROPIC_API_KEY  Required for Claude API"
-            echo "  RALPH_MODEL        Model to use (default: claude-sonnet-4-20250514)"
+            echo "Examples:"
+            echo "  $0 --verbose --issue 001   # Watch one issue in detail"
+            echo "  $0 --status                # See what's pending"
+            echo "  $0                         # Run full loop"
+            echo ""
+            echo "Requirements:"
+            echo "  - Claude Code CLI (claude command)"
+            echo "  - jq"
+            echo "  - npm"
             ;;
         *)
             run_loop

@@ -1,117 +1,83 @@
 # Ralph: Automated Development Loop
 
-Ralph is an automated development system that uses Claude API to go from feature request to working code.
+Ralph is an automated development system that uses Claude Code to implement features based on failing tests.
 
-## The Full Loop
+## The Loop
 
 ```
-Human: "I want feature X" (one sentence)
+Human: "I want feature X"
               ↓
-┌──────────────────────────────────────┐
-│         SPEC GENERATION              │
-│                                      │
-│  Claude: Writes PRD                  │
-│  Claude: Writes failing tests        │
-│  Claude: Generates issues.json       │
-│                                      │
-└──────────────────────────────────────┘
+         spec.sh
               ↓
-┌──────────────────────────────────────┐
-│         IMPLEMENTATION               │
-│                                      │
-│  Loop until all tests pass:          │
-│    1. Read spec + code               │
-│    2. Write implementation           │
-│    3. Build                          │
-│    4. Test                           │
-│    5. If fail → retry                │
-│    6. If pass → next issue           │
-│                                      │
-└──────────────────────────────────────┘
+   PRD + Tests + Issues
               ↓
-Human: Review, merge
+         ralph.sh
+              ↓
+┌─────────────────────────────────┐
+│  For each issue:                │
+│                                 │
+│  1. Fresh Claude Code session   │
+│  2. Claude reads test           │
+│  3. Claude explores codebase    │
+│  4. Claude implements           │
+│  5. Claude runs test            │
+│  6. If fail → retry             │
+│  7. If pass → next issue        │
+│                                 │
+└─────────────────────────────────┘
+              ↓
+Human: Review, commit, push
 ```
 
-## Quickest Start (GitHub Issues)
+## Why Claude Code?
 
-1. **Add secret**: Settings → Secrets → `ANTHROPIC_API_KEY`
-2. **Create Issue**: Describe your feature in plain English
-3. **Add label**: `spec` to generate PRD and tests
-4. **Add label**: `ralph` to implement (or `auto-implement` for both)
-5. **Review**: Check the commits in the morning
+The original Ralph used direct API calls with manually specified context files. This was fragile—if the fix needed a file we didn't list, it failed.
 
-That's it. Feature request → working code, overnight.
+Claude Code solves this:
+- **Explores the codebase itself** — finds relevant files
+- **Runs commands** — builds, tests, sees real errors
+- **Iterates within a task** — tries multiple approaches
+- **Fresh context per issue** — no rot from previous work
 
-## Local Usage
+## Requirements
+
+- [Claude Code CLI](https://github.com/anthropics/claude-code) installed and authenticated
+- Node.js 18+
+- jq
+
+## Quick Start
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
+# Check what needs doing
+npm run ralph:status
 
-# Generate spec from description
-npm run ralph:spec "Users should be able to export their project as a PDF"
-
-# Review what was generated
-cat .ralph/prd/*.md
-cat tests/*.spec.ts
-
-# Run implementation
+# Run the loop (processes all pending issues)
 npm run ralph
 
-# Check status
-npm run ralph:status
-```
-
-## Commands
-
-```bash
-# Generate spec from feature description
-./.ralph/spec.sh "Feature description here"
-./.ralph/spec.sh --file feature-request.txt
-
-# Run all pending issues
-./.ralph/ralph.sh
-
-# Run specific issue
+# Run a specific issue
 ./.ralph/ralph.sh --issue 001
 
-# Parse existing PRD into issues
-./.ralph/ralph.sh --parse path/to/PRD.md
-
-# Show status
-./.ralph/ralph.sh --status
+# Reset a failed issue to try again
+./.ralph/ralph.sh --reset 001
 ```
 
-## GitHub Labels
+## Generating Specs
 
-| Label | Effect |
-|-------|--------|
-| `spec` | Generates PRD, tests, and issues from the Issue body |
-| `spec-complete` | (Auto-added) Spec generation finished |
-| `ralph` | Runs implementation loop on pending issues |
-| `auto-implement` | Runs spec generation AND implementation together |
+```bash
+# From a description
+npm run ralph:spec "Users should be able to export their project as a PDF"
 
-### Example Issue
-
-**Title:** PDF Export Feature
-
-**Body:**
-```
-Users should be able to export their entire project as a formatted PDF document.
-
-- Include all chapters in order
-- Include title page with project name
-- Table of contents
-- Chapter headings
-- Page numbers
+# From a file
+./.ralph/spec.sh --file feature-request.txt
 ```
 
-**Labels:** `spec`, `auto-implement`
+This invokes Claude Code to:
+1. Explore the existing codebase
+2. Generate a PRD (`.ralph/prd/feature-name.md`)
+3. Generate Playwright tests (`tests/feature-name.spec.ts`)
+4. Add issues to `issues.json`
 
-**Result:** Overnight, you get PRD, tests, implementation, all committed.
-
-## How It Works
-
-### 1. Issues File
+## Issues File
 
 All work is tracked in `.ralph/issues.json`:
 
@@ -120,10 +86,11 @@ All work is tracked in `.ralph/issues.json`:
   "issues": [
     {
       "id": "001",
-      "title": "Feature description",
-      "status": "pending",          // pending | complete
+      "title": "Short description",
+      "status": "pending",
+      "priority": 2,
       "spec": "What needs to work",
-      "test_file": "tests/foo.spec.ts",
+      "test_file": "tests/feature.spec.ts",
       "test_name": "specific test name",
       "relevant_files": ["src/Component.tsx"],
       "depends_on": [],
@@ -135,159 +102,89 @@ All work is tracked in `.ralph/issues.json`:
 }
 ```
 
-### 2. Processing Loop
+**Status values:**
+- `pending` — Ready to work
+- `complete` — Done
 
-For each pending issue:
+**The loop:**
+1. Gets next pending issue with attempts < max_attempts
+2. Invokes Claude Code with the spec and test name
+3. Claude explores, implements, runs test
+4. If test passes → mark complete
+5. If test fails → increment attempts, record error, continue
+6. Repeat until no pending issues
 
-1. **Read context** - Load relevant source files
-2. **Build prompt** - Spec + context + last error
-3. **Call Claude** - One-shot API call
-4. **Apply changes** - Extract and write files from response
-5. **Build** - Run `npm run build`
-6. **Test** - Run specific Playwright test
-7. **Update status** - Mark complete or record error
+## Commands
 
-### 3. Claude Response Format
+```bash
+# Run all pending issues
+./.ralph/ralph.sh
 
-Claude is instructed to respond with complete files:
+# Run specific issue
+./.ralph/ralph.sh --issue 001
 
+# Show status
+./.ralph/ralph.sh --status
+
+# Reset issue to pending
+./.ralph/ralph.sh --reset 001
+
+# Generate spec from description
+./.ralph/spec.sh "feature description"
 ```
-=== FILE: src/components/Example.tsx ===
-```typescript
-// Complete file contents
-export function Example() {
-  return <div>...</div>;
-}
-```
-
-=== FILE: src/lib/helper.ts ===
-```typescript
-// Another complete file
-export function helper() {}
-```
-```
-
-### 4. Error Recovery
-
-If a test fails:
-- Error is captured and stored in `last_error`
-- Next attempt includes the error in context
-- After `max_attempts`, issue is skipped
-- Loop continues to next issue
-
-## Writing Good Issues
-
-### Do
-- One test per issue
-- Specific, testable acceptance criteria
-- List all files that might need changes
-- Order issues by dependency
-
-### Don't
-- Vague specs ("make it work better")
-- Multiple unrelated changes per issue
-- Missing test coverage
-- Circular dependencies
-
-## Writing Tests
-
-Tests should be:
-
-1. **Specific** - Test one behavior
-2. **Isolated** - Clear storage before each test
-3. **Deterministic** - Mock external APIs
-4. **Fast** - No unnecessary waits
-
-Example:
-
-```typescript
-test('saves valid API key', async ({ page }) => {
-  await setupMocks(page);      // Deterministic
-  await clearStorage(page);    // Isolated
-  
-  await page.goto('/');
-  await page.click('text=Settings');
-  await page.fill('input', 'valid-key');
-  await page.click('text=Save');
-  
-  await expect(page.locator('text=Saved')).toBeVisible();  // Specific
-});
-```
-
-## PRD Format
-
-Use `.ralph/PRD_TEMPLATE.md` as a starting point. Key sections:
-
-- **User Story** - Who wants what and why
-- **Acceptance Criteria** - Testable requirements
-- **Technical Requirements** - Files, types, components
-- **Test Specification** - What tests to write
-
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ANTHROPIC_API_KEY` | (required) | Claude API key |
-| `RALPH_MODEL` | `claude-sonnet-4-20250514` | Model to use |
-| `RALPH_MAX_TOKENS` | `8192` | Max response tokens |
 
 ## Logs
 
 All logs are stored in `.ralph/logs/`:
+- `claude_XXX_timestamp.log` — Claude Code output per issue
+- `test.log` — Last test run output
 
-- `build.log` - Last build output
-- `test.log` - Last test output
-- `response_XXX.txt` - Claude responses per issue
+## Writing Good Issues
 
-## Troubleshooting
+**Do:**
+- One test per issue
+- Specific, testable acceptance criteria
+- Order by dependency (basics first)
 
-### "No more pending issues" but tests still fail
+**Don't:**
+- Vague specs ("make it better")
+- Multiple unrelated changes
+- Skip test coverage
 
-Check if issues hit max attempts:
-```bash
-jq '.issues[] | select(.attempts >= .max_attempts)' .ralph/issues.json
-```
+## CI/CD
 
-### Claude keeps making the same mistake
+The Ralph loop runs locally (requires Claude Code CLI). 
 
-Review `.ralph/logs/response_XXX.txt` for the issue. The error might not be descriptive enough. Try:
-1. Adding more context to `relevant_files`
-2. Making the spec more explicit
-3. Simplifying the test
+GitHub Actions runs tests on push/PR to verify nothing broke:
+- `.github/workflows/test.yml` — Runs Playwright tests
+- `.github/workflows/deploy.yml` — Deploys to GitHub Pages
 
-### Build passes but tests timeout
-
-Playwright might not be waiting for the dev server. Check:
-1. `playwright.config.ts` webServer settings
-2. Increase timeout if needed
-3. Ensure dev server starts without errors
-
-## Extending Ralph
-
-### Custom Test Commands
-
-Edit `run_tests()` in `ralph.sh`:
+## Typical Workflow
 
 ```bash
-run_tests() {
-    # Add custom logic
-    if [ "$test_file" == "tests/e2e.spec.ts" ]; then
-        # Special handling for e2e tests
-    fi
-}
+# Morning: generate spec for today's feature
+npm run ralph:spec "Add PDF export with chapter headers"
+
+# Review what was generated
+cat .ralph/prd/add-pdf-export*.md
+cat tests/add-pdf-export*.spec.ts
+
+# Run the loop (go make coffee)
+npm run ralph
+
+# Check status
+npm run ralph:status
+
+# Review changes, commit
+git add -A
+git commit -m "feat: PDF export"
+git push
 ```
 
-### Different CI Environments
+## Cost
 
-For GitHub Actions, create `.github/workflows/ralph.yml`:
+Each issue = one Claude Code session. 
 
-```yaml
-- name: Run Ralph
-  env:
-    ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-  run: npm run ralph
-```
+Typical session: 5-20 API calls depending on complexity.
 
-### Multiple Projects
-
-Copy `.ralph/` to each project. Or create a monorepo setup with shared scripts.
+A feature with 5 issues might cost $0.50-2.00 depending on model and iteration count.
