@@ -1,0 +1,190 @@
+name: Feature Spec Generation
+
+on:
+  # Trigger when issue is labeled
+  issues:
+    types: [labeled]
+  
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      feature_description:
+        description: 'Feature description'
+        required: true
+        type: string
+      run_implementation:
+        description: 'Run implementation loop after spec generation'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  generate-spec:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    
+    # Only run if labeled 'spec' or manually triggered
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issues' && github.event.label.name == 'spec')
+
+    outputs:
+      spec_generated: ${{ steps.spec.outputs.generated }}
+      prd_file: ${{ steps.spec.outputs.prd_file }}
+      test_file: ${{ steps.spec.outputs.test_file }}
+      issue_count: ${{ steps.spec.outputs.issue_count }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Get feature description
+        id: description
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "description<<EOF" >> $GITHUB_OUTPUT
+            echo "${{ github.event.inputs.feature_description }}" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            # Get from issue body
+            echo "description<<EOF" >> $GITHUB_OUTPUT
+            echo "${{ github.event.issue.body }}" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            echo "issue_number=${{ github.event.issue.number }}" >> $GITHUB_OUTPUT
+            echo "issue_title=${{ github.event.issue.title }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate spec
+        id: spec
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          mkdir -p .ralph/prd .ralph/logs
+          
+          # Run spec generation
+          ./.ralph/spec.sh "${{ steps.description.outputs.description }}" 2>&1 | tee spec-output.log
+          
+          # Capture outputs
+          PRD_FILE=$(ls -t .ralph/prd/*.md 2>/dev/null | head -1)
+          TEST_FILE=$(grep "Tests saved:" spec-output.log | sed 's/.*: //' || echo "")
+          ISSUE_COUNT=$(grep "Added.*issues" spec-output.log | grep -oE '[0-9]+' | head -1 || echo "0")
+          
+          echo "generated=true" >> $GITHUB_OUTPUT
+          echo "prd_file=$PRD_FILE" >> $GITHUB_OUTPUT
+          echo "test_file=$TEST_FILE" >> $GITHUB_OUTPUT
+          echo "issue_count=$ISSUE_COUNT" >> $GITHUB_OUTPUT
+
+      - name: Commit generated files
+        run: |
+          git config user.name "Ralph Bot"
+          git config user.email "ralph@emerson.dev"
+          
+          git add -A
+          
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            DESCRIPTION="${{ steps.description.outputs.issue_title || 'Feature request' }}"
+            git commit -m "spec: Generate PRD and tests for $DESCRIPTION
+
+PRD: ${{ steps.spec.outputs.prd_file }}
+Tests: ${{ steps.spec.outputs.test_file }}
+Issues: ${{ steps.spec.outputs.issue_count }} new
+
+${{ steps.description.outputs.issue_number && format('Closes #{0}', steps.description.outputs.issue_number) || '' }}"
+            
+            git push
+          fi
+
+      - name: Comment on issue
+        if: github.event_name == 'issues'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prdFile = '${{ steps.spec.outputs.prd_file }}';
+            const testFile = '${{ steps.spec.outputs.test_file }}';
+            const issueCount = '${{ steps.spec.outputs.issue_count }}';
+            
+            const body = `## 🤖 Spec Generated!
+            
+I've created the following files based on your feature request:
+
+| File | Description |
+|------|-------------|
+| \`${prdFile}\` | Product Requirements Document |
+| \`${testFile}\` | Playwright test file |
+| \`.ralph/issues.json\` | +${issueCount} implementation tasks |
+
+### Next Steps
+
+1. **Review the PRD** - Check if it captures your intent
+2. **Review the tests** - Ensure they cover your requirements  
+3. **Trigger implementation** - Add the \`ralph\` label to start the implementation loop
+
+Or run manually:
+\`\`\`bash
+npm run ralph
+\`\`\``;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+            
+            // Remove 'spec' label, add 'spec-complete'
+            github.rest.issues.removeLabel({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'spec'
+            }).catch(() => {});
+            
+            github.rest.issues.addLabels({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: ['spec-complete']
+            });
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: spec-generation
+          path: |
+            .ralph/prd/
+            .ralph/logs/
+            spec-output.log
+          retention-days: 7
+
+      - name: Create summary
+        run: |
+          echo "## Spec Generation Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Output | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| PRD | \`${{ steps.spec.outputs.prd_file }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tests | \`${{ steps.spec.outputs.test_file }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Issues Created | ${{ steps.spec.outputs.issue_count }} |" >> $GITHUB_STEP_SUMMARY
+
+  # Optional: run implementation after spec
+  implement:
+    needs: generate-spec
+    if: |
+      needs.generate-spec.outputs.spec_generated == 'true' &&
+      (github.event.inputs.run_implementation == 'true' ||
+       (github.event_name == 'issues' && contains(github.event.issue.labels.*.name, 'auto-implement')))
+    uses: ./.github/workflows/ralph.yml
+    secrets: inherit

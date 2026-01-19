@@ -1,0 +1,179 @@
+name: Ralph Development Loop
+
+on:
+  # Manual trigger with options
+  workflow_dispatch:
+    inputs:
+      issue_id:
+        description: 'Specific issue ID (leave empty for all pending)'
+        required: false
+        default: ''
+      max_iterations:
+        description: 'Max iterations before stopping'
+        required: false
+        default: '20'
+
+  # Scheduled runs (overnight EST = early morning UTC)
+  schedule:
+    - cron: '0 5 * * *'  # 5am UTC = midnight EST
+
+  # Or trigger on specific label
+  issues:
+    types: [labeled]
+
+jobs:
+  ralph:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    
+    # Only run if triggered manually, scheduled, or has 'ralph' label
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
+      (github.event_name == 'issues' && github.event.label.name == 'ralph')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install chromium --with-deps
+
+      - name: Show initial status
+        run: ./.ralph/ralph.sh --status
+
+      - name: Run Ralph loop
+        id: ralph
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          RALPH_MODEL: ${{ vars.RALPH_MODEL || 'claude-sonnet-4-20250514' }}
+          RALPH_MAX_TOKENS: ${{ vars.RALPH_MAX_TOKENS || '8192' }}
+        run: |
+          # Create logs directory
+          mkdir -p .ralph/logs
+          
+          # Run specific issue or all pending
+          if [ -n "${{ github.event.inputs.issue_id }}" ]; then
+            ./.ralph/ralph.sh --issue "${{ github.event.inputs.issue_id }}" 2>&1 | tee ralph-output.log
+          else
+            # Run loop with iteration limit
+            MAX_ITER="${{ github.event.inputs.max_iterations || '20' }}"
+            ITER=0
+            
+            while [ $ITER -lt $MAX_ITER ]; do
+              ITER=$((ITER + 1))
+              echo "=== Loop iteration $ITER of $MAX_ITER ==="
+              
+              # Get next pending issue
+              NEXT_ISSUE=$(jq -r '.issues[] | select(.status == "pending") | select(.attempts < .max_attempts) | .id' .ralph/issues.json | head -1)
+              
+              if [ -z "$NEXT_ISSUE" ]; then
+                echo "No more pending issues!"
+                break
+              fi
+              
+              echo "Processing issue: $NEXT_ISSUE"
+              ./.ralph/ralph.sh --issue "$NEXT_ISSUE" 2>&1 | tee -a ralph-output.log || true
+              
+              # Small delay to avoid rate limits
+              sleep 2
+            done
+          fi
+          
+          # Capture final status
+          ./.ralph/ralph.sh --status > ralph-status.txt
+          
+          # Check if any issues were completed
+          COMPLETED=$(jq '[.issues[] | select(.status == "complete")] | length' .ralph/issues.json)
+          echo "completed=$COMPLETED" >> $GITHUB_OUTPUT
+
+      - name: Show final status
+        run: cat ralph-status.txt
+
+      - name: Commit changes
+        if: steps.ralph.outputs.completed != '0'
+        run: |
+          git config user.name "Ralph Bot"
+          git config user.email "ralph@emerson.dev"
+          
+          # Add all source changes
+          git add -A
+          
+          # Check if there are changes to commit
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            # Get list of completed issues for commit message
+            COMPLETED_ISSUES=$(jq -r '.issues[] | select(.status == "complete") | "- \(.id): \(.title)"' .ralph/issues.json | head -10)
+            
+            git commit -m "feat: Ralph automated changes
+
+Completed issues:
+$COMPLETED_ISSUES
+
+[skip ci]"
+            
+            git push
+          fi
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ralph-logs
+          path: |
+            .ralph/logs/
+            ralph-output.log
+            ralph-status.txt
+            test-results/
+            playwright-report/
+          retention-days: 7
+
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
+
+      - name: Create summary
+        if: always()
+        run: |
+          echo "## Ralph Development Loop Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Status table
+          echo "### Issue Status" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| ID | Title | Status | Attempts |" >> $GITHUB_STEP_SUMMARY
+          echo "|:---|:------|:-------|:---------|" >> $GITHUB_STEP_SUMMARY
+          
+          jq -r '.issues[] | "| \(.id) | \(.title) | \(.status) | \(.attempts)/\(.max_attempts) |"' .ralph/issues.json >> $GITHUB_STEP_SUMMARY
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Counts
+          TOTAL=$(jq '.issues | length' .ralph/issues.json)
+          COMPLETE=$(jq '[.issues[] | select(.status == "complete")] | length' .ralph/issues.json)
+          PENDING=$(jq '[.issues[] | select(.status == "pending")] | length' .ralph/issues.json)
+          MAXED=$(jq '[.issues[] | select(.attempts >= .max_attempts)] | length' .ralph/issues.json)
+          
+          echo "### Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Total: $TOTAL" >> $GITHUB_STEP_SUMMARY
+          echo "- ✅ Complete: $COMPLETE" >> $GITHUB_STEP_SUMMARY
+          echo "- ⏳ Pending: $PENDING" >> $GITHUB_STEP_SUMMARY
+          echo "- ❌ Max attempts: $MAXED" >> $GITHUB_STEP_SUMMARY
