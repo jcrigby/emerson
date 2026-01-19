@@ -81,6 +81,7 @@ export const useAppStore = create<AppState>()(
         openRouterKey: state.openRouterKey,
         modelPreferences: state.modelPreferences,
         currentProjectId: state.currentProjectId,
+        activeView: state.activeView,
       }),
     }
   )

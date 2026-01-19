@@ -322,8 +322,8 @@ export function IngestionView({ onComplete }: { onComplete: (projectId: string) 
 
   // Build the project
   const buildProject = async () => {
-    if (!projectName.trim() || !analysis) return;
-    
+    if (!projectName.trim()) return;
+
     setStep('building');
     setIsProcessing(true);
     addMessage('system', 'Building your project...');
@@ -333,7 +333,7 @@ export function IngestionView({ onComplete }: { onComplete: (projectId: string) 
       const project: Project = {
         id: crypto.randomUUID(),
         name: projectName.trim(),
-        genre: analysis.genre || 'Fiction',
+        genre: analysis?.genre || 'Fiction',
         status: 'drafting',
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -344,80 +344,86 @@ export function IngestionView({ onComplete }: { onComplete: (projectId: string) 
 
       await saveProject(project);
 
-      // Create codex entries for characters
-      setProgress('Creating characters...');
-      for (const char of analysis.characters.slice(0, 20)) { // Limit to top 20
-        const entry: CodexEntry & { projectId: string } = {
-          id: crypto.randomUUID(),
-          projectId: project.id,
-          type: 'character',
-          name: char.name,
-          aliases: char.aliases,
-          description: char.description || '',
-          attributes: {
-            role: char.role || 'unknown',
-            mentions: String(char.mentions),
-          },
-          relationships: [],
-          tags: [],
-        };
-        await db.codex.put(entry);
-      }
-
-      // Create codex entries for locations
-      setProgress('Creating locations...');
-      for (const loc of analysis.locations.slice(0, 15)) {
-        const entry: CodexEntry & { projectId: string } = {
-          id: crypto.randomUUID(),
-          projectId: project.id,
-          type: 'location',
-          name: loc.name,
-          aliases: [],
-          description: loc.description || '',
-          attributes: {},
-          relationships: [],
-          tags: [],
-        };
-        await db.codex.put(entry);
-      }
-
-      // Create chapters and import content
-      setProgress('Importing chapters...');
-      for (const chapter of analysis.structureGuess.chapters) {
-        const chapterEntry = {
-          id: crypto.randomUUID(),
-          projectId: project.id,
-          number: chapter.number || 0,
-          title: chapter.title || `Chapter ${chapter.number || '?'}`,
-          scenes: [],
-          summary: undefined,
-        };
-        await db.chapters.put(chapterEntry);
-
-        // Create scene with the content
-        const chapterFile = classifiedFiles.find(f => chapter.files.includes(f.name));
-        if (chapterFile) {
-          const scene = {
+      // Only process analysis data if we have it (i.e., not starting fresh)
+      if (analysis) {
+        // Create codex entries for characters
+        setProgress('Creating characters...');
+        for (const char of analysis.characters.slice(0, 20)) { // Limit to top 20
+          const entry: CodexEntry & { projectId: string } = {
             id: crypto.randomUUID(),
             projectId: project.id,
-            chapterId: chapterEntry.id,
-            number: 1,
-            goal: chapterFile.summary || 'Imported scene',
-            status: chapter.status === 'complete' ? 'drafted' as const : 'planned' as const,
-            content: chapterFile.content,
-            wordCount: countWords(chapterFile.content),
-            issues: [],
+            type: 'character',
+            name: char.name,
+            aliases: char.aliases,
+            description: char.description || '',
+            attributes: {
+              role: char.role || 'unknown',
+              mentions: String(char.mentions),
+            },
+            relationships: [],
+            tags: [],
           };
-          await db.scenes.put(scene);
+          await db.codex.put(entry);
         }
+
+        // Create codex entries for locations
+        setProgress('Creating locations...');
+        for (const loc of analysis.locations.slice(0, 15)) {
+          const entry: CodexEntry & { projectId: string } = {
+            id: crypto.randomUUID(),
+            projectId: project.id,
+            type: 'location',
+            name: loc.name,
+            aliases: [],
+            description: loc.description || '',
+            attributes: {},
+            relationships: [],
+            tags: [],
+          };
+          await db.codex.put(entry);
+        }
+
+        // Create chapters and import content
+        setProgress('Importing chapters...');
+        for (const chapter of analysis.structureGuess.chapters) {
+          const chapterEntry = {
+            id: crypto.randomUUID(),
+            projectId: project.id,
+            number: chapter.number || 0,
+            title: chapter.title || `Chapter ${chapter.number || '?'}`,
+            scenes: [],
+            summary: undefined,
+          };
+          await db.chapters.put(chapterEntry);
+
+          // Create scene with the content
+          const chapterFile = classifiedFiles.find(f => chapter.files.includes(f.name));
+          if (chapterFile) {
+            const scene = {
+              id: crypto.randomUUID(),
+              projectId: project.id,
+              chapterId: chapterEntry.id,
+              number: 1,
+              goal: chapterFile.summary || 'Imported scene',
+              status: chapter.status === 'complete' ? 'drafted' as const : 'planned' as const,
+              content: chapterFile.content,
+              wordCount: countWords(chapterFile.content),
+              issues: [],
+            };
+            await db.scenes.put(scene);
+          }
+        }
+
+        setProgress('');
+        addMessage('assistant', `Your project "${projectName}" is ready! I've imported ${analysis.structureGuess.chapters.length} chapters and created entries for ${analysis.characters.length} characters and ${analysis.locations.length} locations.`);
+      } else {
+        // Starting fresh - no analysis data
+        addMessage('assistant', `Your project "${projectName}" is ready! You can start building your story from scratch.`);
       }
 
-      setProgress('');
       setStep('complete');
       setIsProcessing(false);
-      
-      addMessage('assistant', `Your project "${projectName}" is ready! I've imported ${analysis.structureGuess.chapters.length} chapters and created entries for ${analysis.characters.length} characters and ${analysis.locations.length} locations.`);
-      
+
       // Callback to parent
       setTimeout(() => {
         onComplete(project.id);
@@ -491,7 +497,7 @@ export function IngestionView({ onComplete }: { onComplete: (projectId: string) 
                 What are we working with?
               </h2>
               <p className="text-ink-500 mb-8 max-w-md mx-auto">
-                Do you have existing materials for this novel, or are we starting fresh?
+                Do you have existing materials for this novel, or are you beginning with a blank slate?
               </p>
               
               <div className="flex flex-col sm:flex-row gap-4 justify-center">
@@ -509,8 +515,9 @@ export function IngestionView({ onComplete }: { onComplete: (projectId: string) 
                   <div className="text-sm text-ink-500 mt-1">Drop folder or click to browse</div>
                 </div>
                 
-                <div 
-                  className="page-card p-8 cursor-pointer hover:shadow-page-hover transition-all group"
+                <button
+                  type="button"
+                  className="page-card p-8 cursor-pointer hover:shadow-page-hover transition-all group text-center"
                   onClick={() => {
                     addMessage('assistant', "Starting fresh! Let's begin with the basics. What's your story about?");
                     setStep('confirm');
@@ -519,7 +526,7 @@ export function IngestionView({ onComplete }: { onComplete: (projectId: string) 
                   <FileText className="w-8 h-8 text-accent mx-auto mb-3 group-hover:scale-110 transition-transform" />
                   <div className="font-medium text-ink-900">Starting fresh</div>
                   <div className="text-sm text-ink-500 mt-1">Begin with a blank slate</div>
-                </div>
+                </button>
               </div>
             </div>
           )}

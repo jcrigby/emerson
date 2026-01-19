@@ -9,10 +9,10 @@ test.describe('Dashboard', () => {
 
   test('shows empty state when no projects', async ({ page }) => {
     await page.goto('/');
-    
-    await expect(page.locator('text=Projects')).toBeVisible();
-    await expect(page.locator('text=No projects yet')).toBeVisible();
-    await expect(page.locator('text=New Project')).toBeVisible();
+
+    await expect(page.getByRole('heading', { name: 'Projects', exact: true })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'No projects yet' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'New Project' }).first()).toBeVisible();
   });
 
   test('shows API key warning when not configured', async ({ page }) => {
@@ -49,17 +49,17 @@ test.describe('Dashboard', () => {
 
   test('sidebar navigation works', async ({ page }) => {
     await page.goto('/');
-    
+
     // Should start on dashboard
-    await expect(page.locator('text=Projects')).toBeVisible();
-    
+    await expect(page.getByRole('heading', { name: 'Projects', exact: true })).toBeVisible();
+
     // Click settings
     await page.click('text=Settings');
     await expect(page.locator('text=OpenRouter API Key')).toBeVisible();
-    
+
     // Click back to dashboard
     await page.click('text=Dashboard');
-    await expect(page.locator('text=Projects')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Projects', exact: true })).toBeVisible();
   });
 
   test('sidebar can collapse and expand', async ({ page }) => {

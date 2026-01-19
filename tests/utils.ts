@@ -163,6 +163,8 @@ export async function uploadFiles(page: Page, selector: string, files: string[])
 
 // Helper to clear IndexedDB before tests
 export async function clearStorage(page: Page) {
+  // Navigate to the app first so we have access to storage
+  await page.goto('/');
   await page.evaluate(() => {
     localStorage.clear();
     sessionStorage.clear();

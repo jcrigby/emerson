@@ -102,3 +102,19 @@ export async function getBlockingIssues(projectId: string): Promise<(Issue & { p
   const issues = await db.issues.where({ projectId, severity: 'blocking', resolved: false }).toArray();
   return issues;
 }
+
+export async function saveChapter(chapter: Chapter & { projectId: string }): Promise<void> {
+  await db.chapters.put(chapter);
+}
+
+export async function saveScene(scene: Scene & { projectId: string }): Promise<void> {
+  await db.scenes.put(scene);
+}
+
+export async function saveCodexEntry(entry: CodexEntry & { projectId: string }): Promise<void> {
+  await db.codex.put(entry);
+}
+
+export async function deleteCodexEntry(id: string): Promise<void> {
+  await db.codex.delete(id);
+}

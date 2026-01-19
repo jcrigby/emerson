@@ -18,19 +18,19 @@ test.describe('Ingestion', () => {
   test('shows welcome screen with two options', async ({ page }) => {
     await page.goto('/');
     await page.click('button:has-text("New Project")');
-    
+
     await expect(page.locator('text=What are we working with')).toBeVisible();
     await expect(page.locator('text=I have files')).toBeVisible();
-    await expect(page.locator('text=Starting fresh')).toBeVisible();
+    await expect(page.locator('button:has-text("Starting fresh")')).toBeVisible();
   });
 
   test('starting fresh goes directly to naming', async ({ page }) => {
     await page.goto('/');
     await page.click('button:has-text("New Project")');
-    
+
     // Click "Starting fresh"
-    await page.click('text=Starting fresh');
-    
+    await page.click('button:has-text("Starting fresh")');
+
     // Should ask for project name
     await expect(page.locator('text=What would you like to call this project')).toBeVisible({ timeout: 5000 });
     await expect(page.locator('input[placeholder*="Novel"]')).toBeVisible();
@@ -39,7 +39,7 @@ test.describe('Ingestion', () => {
   test('can create project from scratch', async ({ page }) => {
     await page.goto('/');
     await page.click('button:has-text("New Project")');
-    await page.click('text=Starting fresh');
+    await page.click('button:has-text("Starting fresh")');
     
     // Wait for name prompt
     await expect(page.locator('input[placeholder*="Novel"]')).toBeVisible({ timeout: 5000 });

@@ -182,7 +182,7 @@ Try a different approach this time."
     # Use claude with -p for one-shot mode
     local output_file="$LOG_DIR/claude_${issue_id}_$(date +%s).log"
     
-    if claude -p "$prompt" 2>&1 | tee "$output_file"; then
+    if echo "$prompt" | claude -p --dangerously-skip-permissions 2>&1 | tee "$output_file"; then
         # Check if Claude reported success
         if grep -q "TEST PASSED" "$output_file"; then
             echo -e "${GREEN}✓ Claude reports test passed${NC}"
